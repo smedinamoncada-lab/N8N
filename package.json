@@ -1,0 +1,16 @@
+{
+  "name": "pdf-filler-service",
+  "version": "1.0.0",
+  "description": "Microservicio gratuito para rellenar formularios PDF con pdf-lib",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pdf-lib": "^1.17.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
