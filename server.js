@@ -1,50 +1,76 @@
 // ============================================================
 // Microservicio gratuito para rellenar el PDF (sustituye a PDF.co)
-// Pensado para desplegarse gratis en Render.com (u otro hosting
-// gratuito de Node.js: Railway, Fly.io, Cyclic, Vercel, etc.)
+// Desplegado gratis en Render.com
 // ============================================================
 //
 // Endpoint: POST /fill
 // Body (JSON):
 //   {
 //     "pdfBase64": "....",      // el PDF plantilla en base64
-//     "fields": [               // mismos campos que ya usabas en PDF.co
+//     "fields": [
 //       { "name": "Día", "value": "21" },
-//       { "name": "Vinculación inicial.1", "value": "True" },
+//       { "name": "estado civil.1", "value": "True" },
 //       ...
 //     ]
 //   }
 //
-// Respuesta:
-//   { "pdfBase64": "...PDF relleno en base64...", "warnings": ["campo_x"] }
+// Endpoint: POST /inspect  (diagnóstico, no usar en producción)
+// Body (JSON): { "pdfBase64": "...." }
 // ============================================================
-
+ 
 const express = require('express');
-const { PDFDocument } = require('pdf-lib');
-
+const { PDFDocument, PDFName } = require('pdf-lib');
+ 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
-
+ 
 function isTruthy(v) {
   return v === true || v === 'True' || v === 'true' || v === '1';
 }
-
+ 
+// Algunos formularios (como este de BBVA) implementan un "grupo de
+// opciones" como UN SOLO campo checkbox que internamente tiene varias
+// casillas (widgets/"kids"), una por opción - en vez de un verdadero
+// grupo de radio buttons. pdf-lib no tiene un método de alto nivel para
+// esto, así que seleccionamos manualmente la casilla correcta marcando
+// su estado de apariencia (AS) y apagando las demás.
+function selectCheckboxOption(form, groupName, optionName) {
+  const field = form.getField(groupName);
+  const widgets = field.acroField.getWidgets();
+  const target = PDFName.of(optionName);
+  let matched = false;
+ 
+  for (const widget of widgets) {
+    const apDict = widget.dict.lookup(PDFName.of('AP'));
+    const nDict = apDict && apDict.lookup(PDFName.of('N'));
+    const hasOption = !!(nDict && typeof nDict.keys === 'function' && nDict.keys().includes(target));
+    if (hasOption) matched = true;
+    widget.dict.set(PDFName.of('AS'), hasOption ? target : PDFName.of('Off'));
+  }
+ 
+  if (matched) {
+    field.acroField.dict.set(PDFName.of('V'), target);
+  }
+ 
+  return matched;
+}
+ 
 app.post('/fill', async (req, res) => {
   try {
     const { pdfBase64, fields } = req.body;
-
+ 
     if (!pdfBase64 || !Array.isArray(fields)) {
       return res.status(400).json({
         error: 'Se requiere "pdfBase64" (string) y "fields" (array de {name, value}).',
       });
     }
-
+ 
     const pdfBytes = Buffer.from(pdfBase64, 'base64');
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const form = pdfDoc.getForm();
-
+ 
     const warnings = [];
-
+ 
     for (const { name, value } of fields) {
       // 1) ¿Es un campo de texto?
       try {
@@ -52,38 +78,45 @@ app.post('/fill', async (req, res) => {
         tf.setText(value === null || value === undefined ? '' : String(value));
         continue;
       } catch (e) { /* no es text field */ }
-
-      // 2) ¿Es un checkbox simple?
+ 
+      // 2) ¿Es un checkbox simple (un solo botón, sin opciones)?
       try {
         const cb = form.getCheckBox(name);
         if (isTruthy(value)) cb.check(); else cb.uncheck();
         continue;
-      } catch (e) { /* no es checkbox */ }
-
-      // 3) ¿Es una opción de un grupo de radio buttons? ("grupo.opcion")
+      } catch (e) { /* no es checkbox simple */ }
+ 
+      // 3) ¿Es una opción dentro de un grupo? ("grupo.opcion")
       const dotIndex = name.lastIndexOf('.');
       if (dotIndex > -1) {
         const groupName = name.substring(0, dotIndex);
         const optionName = name.substring(dotIndex + 1);
-
+ 
+        // 3a) ¿Es un verdadero grupo de radio buttons?
         try {
           const rg = form.getRadioGroup(groupName);
           if (isTruthy(value)) rg.select(optionName);
           continue;
         } catch (e) { /* tampoco es radio group */ }
-
+ 
+        // 3b) ¿Es un checkbox con varias casillas/opciones bajo el mismo nombre?
         try {
-          const cb2 = form.getCheckBox(groupName);
-          if (isTruthy(value)) cb2.check(); else cb2.uncheck();
+          form.getCheckBox(groupName); // valida que el campo exista y sea checkbox
+          if (isTruthy(value)) {
+            const ok = selectCheckboxOption(form, groupName, optionName);
+            if (!ok) {
+              warnings.push(`${name} (la opción "${optionName}" no existe en "${groupName}")`);
+            }
+          }
           continue;
         } catch (e) { /* nada coincide */ }
       }
-
+ 
       warnings.push(name);
     }
-
+ 
     const filledBytes = await pdfDoc.save();
-
+ 
     res.json({
       pdfBase64: Buffer.from(filledBytes).toString('base64'),
       warnings,
@@ -93,11 +126,10 @@ app.post('/fill', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
+ 
 // ============================================================
-// Endpoint de diagnóstico: lista todos los campos del PDF con su
-// nombre real y, si es un grupo de radio buttons, sus opciones.
-// Body (JSON): { "pdfBase64": "...." }
+// Diagnóstico: lista todos los campos, y para los checkboxes con
+// varias casillas, los nombres exactos de cada opción disponible.
 // ============================================================
 app.post('/inspect', async (req, res) => {
   try {
@@ -105,29 +137,52 @@ app.post('/inspect', async (req, res) => {
     if (!pdfBase64) {
       return res.status(400).json({ error: 'Se requiere "pdfBase64" (string).' });
     }
-
+ 
     const pdfBytes = Buffer.from(pdfBase64, 'base64');
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const form = pdfDoc.getForm();
-
+ 
     const fields = form.getFields().map((f) => {
       const info = { name: f.getName(), type: f.constructor.name };
+ 
       if (typeof f.getOptions === 'function') {
         try {
           info.options = f.getOptions();
         } catch (e) { /* no aplica */ }
       }
+ 
+      if (f.constructor.name === 'PDFCheckBox') {
+        try {
+          const widgets = f.acroField.getWidgets();
+          info.widgetCount = widgets.length;
+          info.optionsPerWidget = widgets.map((w) => {
+            const apDict = w.dict.lookup(PDFName.of('AP'));
+            const nDict = apDict && apDict.lookup(PDFName.of('N'));
+            if (nDict && typeof nDict.keys === 'function') {
+              return nDict
+                .keys()
+                .map((k) => k.toString().replace(/^\//, ''))
+                .filter((k) => k !== 'Off');
+            }
+            return [];
+          });
+        } catch (e) {
+          info.widgetError = e.message;
+        }
+      }
+ 
       return info;
     });
-
+ 
     res.json({ totalFields: fields.length, fields });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
-
+ 
 app.get('/', (req, res) => res.send('PDF filler activo ✅'));
-
+ 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
+ 
