@@ -94,6 +94,39 @@ app.post('/fill', async (req, res) => {
   }
 });
 
+// ============================================================
+// Endpoint de diagnóstico: lista todos los campos del PDF con su
+// nombre real y, si es un grupo de radio buttons, sus opciones.
+// Body (JSON): { "pdfBase64": "...." }
+// ============================================================
+app.post('/inspect', async (req, res) => {
+  try {
+    const { pdfBase64 } = req.body;
+    if (!pdfBase64) {
+      return res.status(400).json({ error: 'Se requiere "pdfBase64" (string).' });
+    }
+
+    const pdfBytes = Buffer.from(pdfBase64, 'base64');
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const form = pdfDoc.getForm();
+
+    const fields = form.getFields().map((f) => {
+      const info = { name: f.getName(), type: f.constructor.name };
+      if (typeof f.getOptions === 'function') {
+        try {
+          info.options = f.getOptions();
+        } catch (e) { /* no aplica */ }
+      }
+      return info;
+    });
+
+    res.json({ totalFields: fields.length, fields });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/', (req, res) => res.send('PDF filler activo ✅'));
 
 const PORT = process.env.PORT || 3000;
