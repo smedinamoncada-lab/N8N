@@ -180,7 +180,75 @@ app.post('/inspect', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
- 
+// ============================================================
+// AGREGAR ESTO a tu server.js existente (el mismo de Render)
+// ============================================================
+//
+// 1. Arriba del archivo, junto a los otros require:
+//      const ExcelJS = require('exceljs');
+//
+// 2. Pega este bloque ANTES de la línea `app.get('/', ...)`
+//
+// Endpoint: POST /fill-xlsx
+// Body (JSON):
+//   {
+//     "xlsxBase64": "....",     // la planilla plantilla en base64
+//     "sheetName": "PLANILLA RADICACION",
+//     "cells": [
+//       { "cell": "E7", "value": "150,000,000" },
+//       { "cell": "E88", "value": "Empresa de Prueba SAS" },
+//       ...
+//     ]
+//   }
+//
+// Respuesta:
+//   { "xlsxBase64": "...planilla rellena en base64..." }
+// ============================================================
+
+app.post('/fill-xlsx', async (req, res) => {
+  try {
+    const { xlsxBase64, sheetName, cells } = req.body;
+
+    if (!xlsxBase64 || !Array.isArray(cells)) {
+      return res.status(400).json({
+        error: 'Se requiere "xlsxBase64" (string) y "cells" (array de {cell, value}).',
+      });
+    }
+
+    const buffer = Buffer.from(xlsxBase64, 'base64');
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer);
+
+    const worksheet = sheetName
+      ? workbook.getWorksheet(sheetName)
+      : workbook.worksheets[0];
+
+    if (!worksheet) {
+      return res.status(400).json({ error: `No se encontró la hoja "${sheetName}".` });
+    }
+
+    const warnings = [];
+
+    for (const { cell, value } of cells) {
+      if (value === null || value === undefined || value === '') continue; // no pisar celdas sin valor
+      try {
+        worksheet.getCell(cell).value = value;
+      } catch (e) {
+        warnings.push(`${cell}: ${e.message}`);
+      }
+    }
+
+    const outBuffer = await workbook.xlsx.writeBuffer();
+
+    res.json({
+      xlsxBase64: Buffer.from(outBuffer).toString('base64'),
+      warnings,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+}); 
 app.get('/', (req, res) => res.send('PDF filler activo ✅'));
  
 const PORT = process.env.PORT || 3000;
